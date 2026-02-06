@@ -229,7 +229,7 @@ function speakWarning() {
 
   try { window.speechSynthesis.cancel(); } catch(_) {}
 
-  const u = new SpeechSynthesisUtterance("はやくちを検出しました");
+  const u = new SpeechSynthesisUtterance("はやくち、を、検出しました");
   u.lang = "ja-JP";
   u.rate = 1.0;
   u.pitch = 1.0;
