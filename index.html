@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>早口ガード（言葉/10秒・会場向け・デバッグ付き）</title>
+  <title>早口ガード（言葉/10秒・会場向け・デバッグ強化）</title>
   <style>
     body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 16px; }
     h1 { margin: 0 0 8px; font-size: 20px; }
@@ -20,6 +20,7 @@
     textarea { width: 100%; height: 140px; }
     .pill { padding: 3px 8px; border-radius: 999px; border: 1px solid #ddd; font-size: 12px; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
 
     /* 投影用の赤帯 */
     #overlay {
@@ -44,7 +45,7 @@
 <body>
   <div id="overlay">早口です。ゆっくり。</div>
 
-  <h1>早口ガード（直近10秒の「言葉数」で警告 / 会場向け / デバッグ付き）</h1>
+  <h1>早口ガード（直近10秒の「言葉数」で警告 / 会場向け / デバッグ強化）</h1>
 
   <div class="card">
     <div class="row">
@@ -62,7 +63,8 @@
         <option value="chars">文字/10秒（頑丈）</option>
       </select>
 
-      <span class="pill">推奨: words（観客に説明しやすい）</span>
+      <label><input id="mobileMode" type="checkbox" /> モバイル安定モード（推奨）</label>
+      <span id="env" class="pill mono">env: -</span>
     </div>
 
     <div class="row" style="margin-top:10px;">
@@ -91,13 +93,12 @@
     <div id="speed" class="big">0</div>
     <div class="row">
       <div id="judge" class="ok">OK</div>
-      <span id="metricInfo" class="pill">words: Intl.Segmenter</span>
+      <span id="metricInfo" class="pill">words: -</span>
     </div>
   </div>
 
-  <!-- デバッグ（音声が読めてるかを見える化） -->
   <div class="card">
-    <strong>デバッグ（ここを見ると原因がすぐ分かる）</strong>
+    <strong>デバッグ（ここで“認識が返ってるか”が分かる）</strong>
     <div class="row" style="margin-top:8px;">
       <div>認識状態: <span id="recState" class="pill mono">-</span></div>
       <div>音声イベント: <span id="audioState" class="pill mono">-</span></div>
@@ -114,21 +115,23 @@
 
   <div class="card">
     <div class="row" style="justify-content: space-between;">
-      <div>
-        <strong>認識テキスト（final）</strong>
-        <span class="pill">警告はクールダウン付き</span>
-      </div>
+      <div><strong>イベントログ（重要）</strong> <span class="pill">result が出ないなら“APIが返してない”</span></div>
+      <button id="btnLogClear">Log Clear</button>
+    </div>
+    <pre id="evtlog" class="mono" style="margin-top:8px; max-height:220px; overflow:auto;"></pre>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content: space-between;">
+      <div><strong>認識テキスト（final）</strong></div>
       <button id="btnClear">Clear</button>
     </div>
     <textarea id="log" readonly></textarea>
   </div>
 
   <script>
-    // ===== Web Speech API 互換チェック =====
+    // ===== 互換チェック =====
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      alert("このブラウザは音声認識（Web Speech API）に対応していません。Chrome/Edgeを使ってください。");
-    }
 
     // ===== UI =====
     const btnStart = document.getElementById("btnStart");
@@ -136,9 +139,12 @@
     const btnClear = document.getElementById("btnClear");
     const btnFS    = document.getElementById("btnFS");
     const btnWake  = document.getElementById("btnWake");
+    const btnLogClear = document.getElementById("btnLogClear");
 
     const statusEl = document.getElementById("status");
     const metricSel= document.getElementById("metric");
+    const mobileMode = document.getElementById("mobileMode");
+    const envEl = document.getElementById("env");
 
     const thr      = document.getElementById("thr");
     const thrVal   = document.getElementById("thrVal");
@@ -168,14 +174,25 @@
     const lastErrEl    = document.getElementById("lastErr");
     const interimView  = document.getElementById("interimView");
 
-    function nowStr() {
+    // イベントログ
+    const evtlogEl = document.getElementById("evtlog");
+    let evtLines = [];
+    function ts() {
       const d = new Date();
       return d.toLocaleTimeString();
     }
+    function logEvt(msg) {
+      evtLines.push(`[${ts()}] ${msg}`);
+      if (evtLines.length > 80) evtLines = evtLines.slice(-80);
+      evtlogEl.textContent = evtLines.join("\n");
+      evtlogEl.scrollTop = evtlogEl.scrollHeight;
+    }
+    btnLogClear.addEventListener("click", () => { evtLines = []; evtlogEl.textContent = ""; });
+
     function setRecState(s){ recStateEl.textContent = s; }
     function setAudioState(s){ audioStateEl.textContent = s; }
     function setErr(s){ lastErrEl.textContent = s; }
-    function setHeard(){ lastHeardEl.textContent = nowStr(); }
+    function setHeard(){ lastHeardEl.textContent = ts(); }
 
     thr.addEventListener("input", () => thrVal.textContent = String(thr.value));
     vol.addEventListener("input", () => volVal.textContent = Number(vol.value).toFixed(2));
@@ -185,70 +202,50 @@
       try { await document.documentElement.requestFullscreen(); } catch (_) {}
     });
 
-    // ===== Wake Lock（画面スリープ防止。HTTPS必須）=====
+    // ===== Wake Lock =====
     let wakeSentinel = null;
     async function enableWakeLock() {
-      if (!("wakeLock" in navigator)) {
-        alert("Wake Lock 非対応の環境です（機能なしでも動作はします）。");
-        return;
-      }
+      if (!("wakeLock" in navigator)) { alert("Wake Lock 非対応の環境です。"); return; }
       try {
         wakeSentinel = await navigator.wakeLock.request('screen');
         btnWake.textContent = "Keep Awake: ON";
-        wakeSentinel.addEventListener('release', () => {
-          btnWake.textContent = "Keep Awake: OFF";
-        });
-      } catch (e) {
-        alert("Wake Lock 失敗: " + (e?.message || String(e)));
-      }
+        wakeSentinel.addEventListener('release', () => btnWake.textContent = "Keep Awake: OFF");
+        logEvt("wakeLock: ON");
+      } catch (e) { alert("Wake Lock 失敗: " + (e?.message || String(e))); }
     }
     async function disableWakeLock() {
-      if (wakeSentinel) {
-        await wakeSentinel.release();
-        wakeSentinel = null;
-      }
+      if (wakeSentinel) { await wakeSentinel.release(); wakeSentinel = null; }
       btnWake.textContent = "Keep Awake: OFF";
+      logEvt("wakeLock: OFF");
     }
     btnWake.addEventListener("click", async () => {
       if (wakeSentinel) await disableWakeLock();
       else await enableWakeLock();
     });
-    document.addEventListener("visibilitychange", async () => {
-      // ページ復帰時に必要なら再取得（失効することがある）
-      if (document.visibilityState === "visible" && wakeSentinel) {
-        await enableWakeLock();
-      }
-    });
 
     // ===== 設定 =====
-    const WINDOW_MS = 10_000;   // 10秒窓
+    const WINDOW_MS = 10_000;
     const TICK_MS   = 200;
-
-    // 会場向けは連打しない（観客がうるさくなる）
     const BEEP_COOLDOWN_MS  = 2000;
     const VOICE_COOLDOWN_MS = 4500;
 
     // ===== 状態 =====
     let rec = null;
     let running = false;
-
-    // (timestamp, n) を積む：n は「言葉数 or 文字数」
     let events = [];
     let lastInterimN = 0;
     let lastInterimTime = 0;
-
     let lastBeepAt = 0;
     let lastVoiceAt = 0;
     let timerId = null;
+    let restarting = false;
 
-    // ===== 音声（ビープ） =====
+    // ===== 音（ビープ） =====
     let audioCtx = null;
-
     function ensureAudio() {
       audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
       if (audioCtx.state === "suspended") audioCtx.resume().catch(()=>{});
     }
-
     function beepPattern() {
       if (!beepOn.checked) return;
       try {
@@ -256,20 +253,10 @@
         const v = Number(vol.value);
         const now = audioCtx.currentTime;
 
-        const comp = audioCtx.createDynamicsCompressor();
-        comp.threshold.value = -24;
-        comp.knee.value = 20;
-        comp.ratio.value = 6;
-        comp.attack.value = 0.003;
-        comp.release.value = 0.15;
-
         const g = audioCtx.createGain();
         g.gain.value = v;
+        g.connect(audioCtx.destination);
 
-        g.connect(comp);
-        comp.connect(audioCtx.destination);
-
-        // ピッ・ピッ（2回）
         for (let k = 0; k < 2; k++) {
           const o = audioCtx.createOscillator();
           o.type = "square";
@@ -280,35 +267,24 @@
         }
       } catch (_) {}
     }
-
     function speakWarning() {
       if (!voiceOn.checked) return;
       if (!("speechSynthesis" in window)) return;
       try { window.speechSynthesis.cancel(); } catch (_) {}
-
       const u = new SpeechSynthesisUtterance("ゆっくり");
       u.lang = "ja-JP";
       u.rate = 0.95;
-      u.pitch = 1.0;
       u.volume = 1.0;
       try { window.speechSynthesis.speak(u); } catch (_) {}
     }
 
-    // ===== 表示系 =====
+    // ===== 表示 =====
     function setStatus(text) { statusEl.textContent = text; }
-
     function setJudge(isWarn) {
-      if (isWarn) {
-        judgeEl.textContent = "早口警告";
-        judgeEl.classList.remove("ok");
-        judgeEl.classList.add("warn");
-      } else {
-        judgeEl.textContent = "OK";
-        judgeEl.classList.remove("warn");
-        judgeEl.classList.add("ok");
-      }
+      judgeEl.textContent = isWarn ? "早口警告" : "OK";
+      judgeEl.classList.toggle("warn", isWarn);
+      judgeEl.classList.toggle("ok", !isWarn);
     }
-
     function setOverlay(isWarn) {
       if (!bannerOn.checked) {
         overlay.style.display = "none";
@@ -324,127 +300,69 @@
       }
     }
 
-    // ===== カウント関数 =====
-    // 文字数（空白・よくある記号を除去）
+    // ===== カウント =====
     function countCharsJP(text) {
-      let s = text.replace(/\s+/g, "");
+      let s = (text || "").replace(/\s+/g, "");
       s = s.replace(/[、。,.!！?？・：:;；'"“”‘’「」『』（）()［］\[\]【】<>＜＞〜~…‥ー\-—＿_]/g, "");
       return s.length;
     }
 
-    // 言葉数（Intl.Segmenter が使えるならそれで単語分割）
     const hasSegmenter = typeof Intl !== "undefined" && typeof Intl.Segmenter === "function";
     const segJA = hasSegmenter ? new Intl.Segmenter("ja", { granularity: "word" }) : null;
 
     function countWords(text) {
-      // まず空白類を正規化
       const t = (text || "").trim();
       if (!t) return 0;
 
       if (segJA) {
         let n = 0;
         for (const part of segJA.segment(t)) {
-          // isWordLike: 単語っぽいセグメントだけ数える
           if (part.isWordLike) n++;
         }
         return n;
       }
-
-      // フォールバック1：スペース区切り（英語や、認識結果にスペースが入る場合）
       const spaced = t.replace(/\s+/g, " ").trim();
-      if (spaced.includes(" ")) {
-        return spaced.split(" ").filter(Boolean).length;
-      }
-
-      // フォールバック2：最後の手段（日本語でSegmenterが無い環境）
-      // 文字数をざっくり割る（完全ではないが「動かない」よりマシ）
+      if (spaced.includes(" ")) return spaced.split(" ").filter(Boolean).length;
       return Math.max(1, Math.round(countCharsJP(t) / 2.5));
     }
 
-    function currentMetric() {
-      return metricSel.value; // "words" or "chars"
-    }
-
+    function currentMetric() { return metricSel.value; } // words / chars
     function countByMetric(text) {
       return currentMetric() === "words" ? countWords(text) : countCharsJP(text);
     }
 
     function updateMetricUI() {
       if (currentMetric() === "words") {
-        // 現実的な上限：60語/10秒
-        thr.min = "5";
-        thr.max = "60";
-        if (Number(thr.value) > 60) thr.value = "30";
+        thr.min = "5"; thr.max = "60"; // ← 現実的上限
         thrUnit.textContent = "語/10秒";
         metricInfo.textContent = hasSegmenter ? "words: Intl.Segmenter" : "words: fallback";
       } else {
-        // 文字は余裕を持って200まで（発表として十分）
-        thr.min = "20";
-        thr.max = "200";
-        if (Number(thr.value) < 20 || Number(thr.value) > 200) thr.value = "90";
+        thr.min = "20"; thr.max = "200";
         thrUnit.textContent = "文字/10秒";
         metricInfo.textContent = "chars: filtered length";
       }
+      if (Number(thr.value) < Number(thr.min) || Number(thr.value) > Number(thr.max)) {
+        thr.value = currentMetric() === "words" ? "30" : "90";
+      }
       thrVal.textContent = String(thr.value);
     }
-
     metricSel.addEventListener("change", updateMetricUI);
     updateMetricUI();
 
-    // ===== 10秒窓合計 =====
-    function computeN10s(now) {
-      const cutoff = now - WINDOW_MS;
-      events = events.filter(e => e.t >= cutoff);
-
-      let sum = 0;
-      for (const e of events) sum += e.n;
-
-      if (countInterim.checked) {
-        if (lastInterimTime >= cutoff) sum += lastInterimN;
-      }
-      return sum;
-    }
-
-    function tick() {
-      const now = Date.now();
-      const n10 = computeN10s(now);
-      speedEl.textContent = String(n10);
-
-      const threshold = Number(thr.value);
-      const warn = n10 >= threshold;
-
-      setJudge(warn);
-      setOverlay(warn);
-
-      if (warn) {
-        if (now - lastBeepAt >= BEEP_COOLDOWN_MS) {
-          lastBeepAt = now;
-          beepPattern();
-        }
-        if (now - lastVoiceAt >= VOICE_COOLDOWN_MS) {
-          lastVoiceAt = now;
-          speakWarning();
-        }
-      }
-    }
-
-    // ===== マイク音量メーター（getUserMedia）=====
+    // ===== マイク音量メーター =====
     let micStream = null;
     let analyser = null;
     let meterRafId = null;
 
     async function startMicMeter() {
       if (micStream) return;
-
       try {
         ensureAudio();
         micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-
         const src = audioCtx.createMediaStreamSource(micStream);
         analyser = audioCtx.createAnalyser();
         analyser.fftSize = 2048;
         src.connect(analyser);
-
         const buf = new Uint8Array(analyser.fftSize);
 
         const loop = () => {
@@ -454,15 +372,17 @@
             const v = (buf[i] - 128) / 128;
             sum += v * v;
           }
-          const rms = Math.sqrt(sum / buf.length);      // 0〜1くらい
-          const shown = Math.min(1, rms * 2.5);         // 見やすいように増幅
+          const rms = Math.sqrt(sum / buf.length);
+          const shown = Math.min(1, rms * 2.5);
           meterEl.value = shown;
           meterValEl.textContent = rms.toFixed(2);
           meterRafId = requestAnimationFrame(loop);
         };
         loop();
+        logEvt("getUserMedia: OK (meter running)");
       } catch (e) {
         setErr("getUserMedia: " + (e?.name || e?.message || String(e)));
+        logEvt("getUserMedia: FAIL");
       }
     }
 
@@ -478,83 +398,116 @@
       meterValEl.textContent = "0.00";
     }
 
-    // ===== 音声認識 start/stop =====
-    function start() {
-      if (running) return;
+    // ===== 10秒窓合計 =====
+    function computeN10s(now) {
+      const cutoff = now - WINDOW_MS;
+      events = events.filter(e => e.t >= cutoff);
+      let sum = 0;
+      for (const e of events) sum += e.n;
+      if (countInterim.checked && lastInterimTime >= cutoff) sum += lastInterimN;
+      return sum;
+    }
 
-      ensureAudio(); // 音を確実に鳴らせるように起こす
+    function tick() {
+      const now = Date.now();
+      const n10 = computeN10s(now);
+      speedEl.textContent = String(n10);
 
-      // リセット
-      events = [];
-      lastInterimN = 0;
-      lastInterimTime = 0;
-      lastBeepAt = 0;
-      lastVoiceAt = 0;
+      const threshold = Number(thr.value);
+      const warn = n10 >= threshold;
 
-      setErr("-");
-      setRecState("starting...");
-      setAudioState("-");
-      interimView.textContent = "-";
-      lastHeardEl.textContent = "-";
-      setOverlay(false);
-      setJudge(false);
+      setJudge(warn);
+      setOverlay(warn);
 
-      startMicMeter(); // ★音量メーター開始（これが動けばマイクは来てる）
+      if (warn) {
+        if (now - lastBeepAt >= BEEP_COOLDOWN_MS) { lastBeepAt = now; beepPattern(); }
+        if (now - lastVoiceAt >= VOICE_COOLDOWN_MS) { lastVoiceAt = now; speakWarning(); }
+      }
+    }
+
+    function detectEnv() {
+      const ua = navigator.userAgent || "";
+      const isMobile = /Android|iPhone|iPad|iPod/i.test(ua);
+      envEl.textContent = `env: ${isMobile ? "mobile" : "desktop"}`;
+      // モバイルは安定モードをデフォルトON
+      mobileMode.checked = isMobile;
+      logEvt(`UA: ${ua}`);
+    }
+    detectEnv();
+
+    // ===== 音声認識（再起動管理）=====
+    function scheduleRestart(reason) {
+      if (!running || restarting) return;
+      restarting = true;
+      logEvt(`restart scheduled (${reason})`);
+      setTimeout(() => {
+        restarting = false;
+        if (!running) return;
+        try { rec.start(); logEvt("rec.start()"); } catch (e) { logEvt("rec.start() failed"); }
+      }, 350);
+    }
+
+    function startRecognition() {
+      if (!SpeechRecognition) {
+        alert("SpeechRecognition 非対応です。PCのChrome/Edgeで試すのが確実です。");
+        return;
+      }
 
       rec = new SpeechRecognition();
       rec.lang = "ja-JP";
-      rec.continuous = true;
+      // ★モバイルは continuous が不安定なので、安定モードなら false にして自動再起動で回す
+      rec.continuous = !mobileMode.checked;
       rec.interimResults = true;
+      rec.maxAlternatives = 1;
 
       rec.onstart = () => {
-        running = true;
-        setStatus("動作中（マイク入力中）");
         setRecState("listening");
-        timerId = setInterval(tick, TICK_MS);
+        setStatus("動作中（マイク入力中）");
+        logEvt(`start (continuous=${rec.continuous})`);
       };
 
-      // 音声イベント（読めてるか判定）
-      rec.onaudiostart  = () => setAudioState("audio start");
-      rec.onaudioend    = () => setAudioState("audio end");
-      rec.onspeechstart = () => setAudioState("speech start");
-      rec.onspeechend   = () => setAudioState("speech end");
+      rec.onaudiostart  = () => { setAudioState("audiostart"); logEvt("audiostart"); };
+      rec.onaudioend    = () => { setAudioState("audioend"); logEvt("audioend"); };
+      rec.onspeechstart = () => { setAudioState("speechstart"); logEvt("speechstart"); };
+      rec.onspeechend   = () => { setAudioState("speechend"); logEvt("speechend"); };
 
       rec.onerror = (ev) => {
+        const e = ev?.error || "unknown";
+        setErr(e);
         setRecState("error");
-        setErr(ev?.error || "unknown");
-        setStatus("エラー: " + (ev?.error || "unknown"));
+        logEvt(`error: ${e}`);
+
+        // よくある：no-speech / aborted は再起動で復帰することがある
+        if (e === "no-speech" || e === "aborted") scheduleRestart(e);
+        // network は“通信が必要”なので、ネット接続を疑う
+        // not-allowed は権限
       };
 
       rec.onend = () => {
         setRecState(running ? "ended (restart...)" : "ended");
-        // ブラウザが勝手に止めることがあるので、running なら再開を試す
-        if (running) {
-          try { rec.start(); } catch (_) {}
-        } else {
-          setStatus("停止中");
-        }
+        logEvt("end");
+        // 安定モード（continuous=false）なら常に再起動
+        if (running) scheduleRestart("end");
       };
 
       rec.onresult = (event) => {
+        logEvt("result");
         const now = Date.now();
         let interimText = "";
 
         for (let i = event.resultIndex; i < event.results.length; i++) {
           const res = event.results[i];
-          const text = res[0].transcript || "";
+          const text = res[0]?.transcript || "";
 
           if (res.isFinal) {
             const n = countByMetric(text);
             if (n > 0) events.push({ t: now, n });
-
             logEl.value += text.trim() + "\n";
             logEl.scrollTop = logEl.scrollHeight;
 
-            // final が来たら暫定はリセット（重複加算防止）
             lastInterimN = 0;
             lastInterimTime = 0;
             interimView.textContent = "-";
-
             setHeard();
           } else {
             interimText += text;
@@ -569,33 +522,54 @@
         }
       };
 
-      try {
-        rec.start();
-      } catch (e) {
-        setErr("start failed");
-        alert("開始できませんでした。ページ再読み込み後、マイク許可を確認してください。");
-      }
+      try { rec.start(); logEvt("rec.start()"); }
+      catch (e) { setErr("start failed"); logEvt("rec.start() failed"); }
+    }
+
+    function start() {
+      if (running) return;
+      ensureAudio();
+
+      // reset
+      events = [];
+      lastInterimN = 0;
+      lastInterimTime = 0;
+      lastBeepAt = 0;
+      lastVoiceAt = 0;
+      restarting = false;
+
+      setErr("-");
+      setRecState("starting...");
+      setAudioState("-");
+      interimView.textContent = "-";
+      lastHeardEl.textContent = "-";
+      setOverlay(false);
+      setJudge(false);
+      setStatus("起動中...");
+
+      startMicMeter();
+      running = true;
+      timerId = setInterval(tick, TICK_MS);
+
+      startRecognition();
     }
 
     function stop() {
       running = false;
       if (timerId) { clearInterval(timerId); timerId = null; }
-
       setOverlay(false);
       setJudge(false);
       speedEl.textContent = "0";
 
-      if (rec) {
-        try { rec.onend = null; rec.stop(); } catch (_) {}
-      }
+      try { if (rec) { rec.onend = null; rec.stop(); } } catch (_) {}
       stopMicMeter();
 
       setStatus("停止中");
       setRecState("stopped");
       setAudioState("-");
       interimView.textContent = "-";
-
       try { window.speechSynthesis.cancel(); } catch (_) {}
+      logEvt("STOP");
     }
 
     btnStart.addEventListener("click", start);
