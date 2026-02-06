@@ -223,20 +223,20 @@
   }
 
   // 音声
-  function speakWarning() {
-    if (!voiceOn.checked) return;
-    if (!("speechSynthesis" in window)) return;
+function speakWarning() {
+  if (!voiceOn.checked) return;
+  if (!("speechSynthesis" in window)) return;
 
-    try { window.speechSynthesis.cancel(); } catch(_) {}
+  try { window.speechSynthesis.cancel(); } catch(_) {}
 
-    const u = new SpeechSynthesisUtterance("スピードを落として");
-    u.lang = "ja-JP";
-    u.rate = 1.0;
-    u.pitch = 1.0;
-    u.volume = 1.0;
+  const u = new SpeechSynthesisUtterance("早口を検出しました");
+  u.lang = "ja-JP";
+  u.rate = 1.0;
+  u.pitch = 1.0;
+  u.volume = 1.0;
 
-    try { window.speechSynthesis.speak(u); } catch(_) {}
-  }
+  try { window.speechSynthesis.speak(u); } catch(_) {}
+}
 
   function setJudge(warn) {
     judgeEl.textContent = warn ? "警告" : "OK";
