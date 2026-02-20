@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Cache-Control" content="no-store" />
   <title>早口検出器</title>
   <style>
     body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 16px; }
@@ -51,7 +52,7 @@
       <button id="btnStop">Stop</button>
       <button id="btnFS">FullScreen</button>
       <span id="status" class="pill">停止中</span>
-      <span id="meterMode" class="pill">音量メーター OFF</span>
+      <span id="ver" class="pill mono">VERSION:-</span>
     </div>
 
     <div class="row" style="margin-top:12px;">
@@ -79,8 +80,8 @@
     <div id="speed" class="big">0</div>
     <div class="row">
       <div id="judge" class="ok">OK</div>
-      <span class="pill">暫定結果は常に加味</span>
-      <span class="pill">モバイル安定モード固定</span>
+      <span class="pill">暫定結果を加味</span>
+      <span class="pill">モバイル安定モード</span>
     </div>
   </div>
 
@@ -99,17 +100,16 @@
   </div>
 
 <script>
-  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const VERSION = "2026-02-20-mobile-no-meter";
+  document.getElementById("ver").textContent = "VERSION:" + VERSION;
 
-  const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
   const btnStart = document.getElementById("btnStart");
   const btnStop  = document.getElementById("btnStop");
   const btnFS    = document.getElementById("btnFS");
 
   const statusEl = document.getElementById("status");
-  const meterModeEl = document.getElementById("meterMode");
-
   const thr = document.getElementById("thr");
   const thrVal = document.getElementById("thrVal");
   const vol = document.getElementById("vol");
@@ -164,10 +164,6 @@
   let restartTimer = null;
   let restartDelay = 350;
 
-  let startedAt = 0;
-  let lastResultAt = 0;
-  let lastSpeechAt = 0;
-
   let wakeSentinel = null;
   async function enableWakeLockAuto() {
     if (!("wakeLock" in navigator)) return;
@@ -189,11 +185,9 @@
       ensureAudio();
       const v = Number(vol.value);
       const now = audioCtx.currentTime;
-
       const g = audioCtx.createGain();
       g.gain.value = v;
       g.connect(audioCtx.destination);
-
       for (let k = 0; k < 2; k++) {
         const o = audioCtx.createOscillator();
         o.type = "square";
@@ -247,12 +241,9 @@
   function computeChars10s(now) {
     const cutoff = now - WINDOW_MS;
     events = events.filter(e => e.t >= cutoff);
-
     let sum = 0;
     for (const e of events) sum += e.n;
-
     if (lastInterimTime >= cutoff) sum += lastInterimN;
-
     return sum;
   }
 
@@ -268,11 +259,6 @@
     if (warn) {
       if (now - lastBeepAt >= BEEP_COOLDOWN_MS) { lastBeepAt = now; beepPattern(); }
       if (now - lastVoiceAt >= VOICE_COOLDOWN_MS) { lastVoiceAt = now; speakWarning(); }
-    }
-
-    // 音声は来てるのに結果が返らない時のガイド
-    if (running && lastSpeechAt > 0 && lastResultAt === 0 && now - startedAt > 6000) {
-      liveEl.textContent = "音声は検出中だが文字起こしが返っていない";
     }
   }
 
@@ -297,10 +283,11 @@
     }, restartDelay);
   }
 
-  function recreateRecognition(from) {
+  function recreateRecognition() {
     if (!SpeechRecognition) {
       setStatus("非対応");
       setErr("unsupported");
+      liveEl.textContent = "このブラウザは音声認識に非対応";
       return;
     }
 
@@ -310,6 +297,8 @@
     rec.lang = "ja-JP";
     rec.interimResults = true;
     rec.maxAlternatives = 1;
+
+    // モバイル安定モード
     rec.continuous = false;
 
     rec.onstart = () => {
@@ -317,22 +306,18 @@
       setStatus("動作中");
       setErr("-");
       restartDelay = 350;
-      startedAt = Date.now();
-      lastResultAt = 0;
-      lastSpeechAt = 0;
       if (liveEl.textContent === "停止中") liveEl.textContent = "話し始めてください";
     };
 
     rec.onaudiostart  = () => setAudioState("audiostart");
     rec.onaudioend    = () => setAudioState("audioend");
-    rec.onspeechstart = () => { setAudioState("speechstart"); lastSpeechAt = Date.now(); liveEl.textContent = "音声検出中"; };
+    rec.onspeechstart = () => { setAudioState("speechstart"); liveEl.textContent = "音声検出中"; };
     rec.onspeechend   = () => setAudioState("speechend");
 
     rec.onerror = (ev) => {
       const e = ev?.error || "unknown";
       setErr(e);
       setRecState("error");
-
       if (e === "not-allowed" || e === "service-not-allowed") {
         setStatus("マイク許可が必要");
         running = false;
@@ -348,9 +333,8 @@
 
     rec.onresult = (event) => {
       setHeard();
-      lastResultAt = Date.now();
-
       const now = Date.now();
+
       let interimText = "";
       let finalText = "";
 
@@ -410,18 +394,13 @@
     running = true;
     timerId = setInterval(tick, TICK_MS);
 
-    // スマホではマイク競合回避で音量メーターを使わない
-    meterModeEl.textContent = isMobile ? "音量メーター OFF" : "音量メーター ON";
-
-    recreateRecognition("start");
+    recreateRecognition();
   }
 
   function stopAll() {
     running = false;
     clearRestart();
-
     if (timerId) { clearInterval(timerId); timerId = null; }
-
     stopRecognitionInstance();
 
     setStatus("停止中");
