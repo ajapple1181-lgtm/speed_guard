@@ -30,8 +30,6 @@
     #overlay.blink { animation: blink 0.6s step-end infinite; }
     @keyframes blink { 50% { opacity: 0.25; } }
 
-    progress { height: 16px; }
-
     .liveBox {
       border: 1px solid #ddd; border-radius: 12px; padding: 12px;
       min-height: 64px;
@@ -43,7 +41,7 @@
 </head>
 
 <body>
-  <div id="overlay">早口です　スピードを落として</div>
+  <div id="overlay">早口です</div>
 
   <h1>早口検出器</h1>
 
@@ -53,6 +51,7 @@
       <button id="btnStop">Stop</button>
       <button id="btnFS">FullScreen</button>
       <span id="status" class="pill">停止中</span>
+      <span id="meterMode" class="pill">音量メーター OFF</span>
     </div>
 
     <div class="row" style="margin-top:12px;">
@@ -80,39 +79,37 @@
     <div id="speed" class="big">0</div>
     <div class="row">
       <div id="judge" class="ok">OK</div>
-      <span class="pill">暫定結果を常に加味</span>
-      <span class="pill">モバイル安定モード常時</span>
+      <span class="pill">暫定結果は常に加味</span>
+      <span class="pill">モバイル安定モード固定</span>
     </div>
   </div>
 
   <div class="card">
     <div><strong>ライブ表示</strong></div>
-    <div id="live" class="liveBox" style="margin-top:10px;">まだ認識なし</div>
+    <div id="live" class="liveBox" style="margin-top:10px;">停止中</div>
   </div>
 
   <div class="card">
     <div class="row" style="gap:18px;">
       <div>認識状態 <span id="recState" class="pill mono">-</span></div>
-      <div>音声イベント <span id="audioState" class="pill mono">-</span></div>
+      <div>音声状態 <span id="audioState" class="pill mono">-</span></div>
       <div>最終検出 <span id="lastHeard" class="pill mono">-</span></div>
       <div>最終エラー <span id="lastErr" class="pill mono">-</span></div>
-    </div>
-    <div class="row" style="margin-top:10px;">
-      <div>音量</div>
-      <progress id="meter" max="1" value="0" style="width:260px;"></progress>
-      <span id="meterVal" class="pill mono">0.00</span>
     </div>
   </div>
 
 <script>
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
-  // UI
+  const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+
   const btnStart = document.getElementById("btnStart");
   const btnStop  = document.getElementById("btnStop");
   const btnFS    = document.getElementById("btnFS");
 
   const statusEl = document.getElementById("status");
+  const meterModeEl = document.getElementById("meterMode");
+
   const thr = document.getElementById("thr");
   const thrVal = document.getElementById("thrVal");
   const vol = document.getElementById("vol");
@@ -132,9 +129,6 @@
   const lastHeardEl  = document.getElementById("lastHeard");
   const lastErrEl    = document.getElementById("lastErr");
 
-  const meterEl = document.getElementById("meter");
-  const meterValEl = document.getElementById("meterVal");
-
   function ts() { return new Date().toLocaleTimeString(); }
   function setStatus(s){ statusEl.textContent = s; }
   function setRecState(s){ recStateEl.textContent = s; }
@@ -151,49 +145,38 @@
     try { await document.documentElement.requestFullscreen(); } catch (_) {}
   });
 
-  // 常時モバイル安定モード
-  // continuous=false で区切りやすくし、onend で作り直して回す
   const WINDOW_MS = 10_000;
   const TICK_MS = 200;
-  const BEEP_COOLDOWN_MS = 2000;
+  const BEEP_COOLDOWN_MS  = 2000;
   const VOICE_COOLDOWN_MS = 4500;
 
   let running = false;
   let timerId = null;
 
-  // 10秒窓（final）イベント
   let events = [];
-  // 暫定（interim）は常に加味
   let lastInterimN = 0;
   let lastInterimTime = 0;
 
   let lastBeepAt = 0;
   let lastVoiceAt = 0;
 
-  // 認識
   let rec = null;
   let restartTimer = null;
   let restartDelay = 350;
 
-  // Keep Awake 常時ON（Start時に自動取得）
-  let wakeSentinel = null;
+  let startedAt = 0;
+  let lastResultAt = 0;
+  let lastSpeechAt = 0;
 
+  let wakeSentinel = null;
   async function enableWakeLockAuto() {
     if (!("wakeLock" in navigator)) return;
-    try {
-      wakeSentinel = await navigator.wakeLock.request("screen");
-    } catch (_) {
-      // 失敗しても致命ではない
-    }
+    try { wakeSentinel = await navigator.wakeLock.request("screen"); } catch (_) {}
   }
-
   document.addEventListener("visibilitychange", async () => {
-    if (document.visibilityState === "visible" && running) {
-      await enableWakeLockAuto();
-    }
+    if (document.visibilityState === "visible" && running) await enableWakeLockAuto();
   });
 
-  // ビープ
   let audioCtx = null;
   function ensureAudio() {
     audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
@@ -222,21 +205,17 @@
     } catch (_) {}
   }
 
-  // 音声
-function speakWarning() {
-  if (!voiceOn.checked) return;
-  if (!("speechSynthesis" in window)) return;
-
-  try { window.speechSynthesis.cancel(); } catch(_) {}
-
-  const u = new SpeechSynthesisUtterance("はやくち、を、検出しました");
-  u.lang = "ja-JP";
-  u.rate = 1.0;
-  u.pitch = 1.0;
-  u.volume = 1.0;
-
-  try { window.speechSynthesis.speak(u); } catch(_) {}
-}
+  function speakWarning() {
+    if (!voiceOn.checked) return;
+    if (!("speechSynthesis" in window)) return;
+    try { window.speechSynthesis.cancel(); } catch(_) {}
+    const u = new SpeechSynthesisUtterance("早口を検出しました");
+    u.lang = "ja-JP";
+    u.rate = 1.0;
+    u.pitch = 1.0;
+    u.volume = 1.0;
+    try { window.speechSynthesis.speak(u); } catch(_) {}
+  }
 
   function setJudge(warn) {
     judgeEl.textContent = warn ? "警告" : "OK";
@@ -259,7 +238,6 @@ function speakWarning() {
     }
   }
 
-  // 文字数
   function countCharsJP(text) {
     let s = (text || "").replace(/\s+/g, "");
     s = s.replace(/[、。,.!！?？・：:;；'"“”‘’「」『』（）()［］\[\]【】<>＜＞〜~…‥ー\-—＿_]/g, "");
@@ -273,7 +251,6 @@ function speakWarning() {
     let sum = 0;
     for (const e of events) sum += e.n;
 
-    // 暫定結果は常時加味
     if (lastInterimTime >= cutoff) sum += lastInterimN;
 
     return sum;
@@ -289,61 +266,14 @@ function speakWarning() {
     setOverlay(warn);
 
     if (warn) {
-      if (now - lastBeepAt >= BEEP_COOLDOWN_MS) {
-        lastBeepAt = now;
-        beepPattern();
-      }
-      if (now - lastVoiceAt >= VOICE_COOLDOWN_MS) {
-        lastVoiceAt = now;
-        speakWarning();
-      }
+      if (now - lastBeepAt >= BEEP_COOLDOWN_MS) { lastBeepAt = now; beepPattern(); }
+      if (now - lastVoiceAt >= VOICE_COOLDOWN_MS) { lastVoiceAt = now; speakWarning(); }
     }
-  }
 
-  // マイク音量メーター
-  let micStream = null;
-  let analyser = null;
-  let meterRafId = null;
-
-  async function startMicMeter() {
-    if (micStream) return;
-    try {
-      ensureAudio();
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const src = audioCtx.createMediaStreamSource(micStream);
-      analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 2048;
-      src.connect(analyser);
-      const buf = new Uint8Array(analyser.fftSize);
-
-      const loop = () => {
-        analyser.getByteTimeDomainData(buf);
-        let sum = 0;
-        for (let i = 0; i < buf.length; i++) {
-          const v = (buf[i] - 128) / 128;
-          sum += v * v;
-        }
-        const rms = Math.sqrt(sum / buf.length);
-        meterEl.value = Math.min(1, rms * 2.5);
-        meterValEl.textContent = rms.toFixed(2);
-        meterRafId = requestAnimationFrame(loop);
-      };
-      loop();
-    } catch (e) {
-      setErr("getUserMedia");
+    // 音声は来てるのに結果が返らない時のガイド
+    if (running && lastSpeechAt > 0 && lastResultAt === 0 && now - startedAt > 6000) {
+      liveEl.textContent = "音声は検出中だが文字起こしが返っていない";
     }
-  }
-
-  function stopMicMeter() {
-    if (meterRafId) cancelAnimationFrame(meterRafId);
-    meterRafId = null;
-    if (micStream) {
-      micStream.getTracks().forEach(t => t.stop());
-      micStream = null;
-    }
-    analyser = null;
-    meterEl.value = 0;
-    meterValEl.textContent = "0.00";
   }
 
   function clearRestart() {
@@ -387,11 +317,15 @@ function speakWarning() {
       setStatus("動作中");
       setErr("-");
       restartDelay = 350;
+      startedAt = Date.now();
+      lastResultAt = 0;
+      lastSpeechAt = 0;
+      if (liveEl.textContent === "停止中") liveEl.textContent = "話し始めてください";
     };
 
     rec.onaudiostart  = () => setAudioState("audiostart");
     rec.onaudioend    = () => setAudioState("audioend");
-    rec.onspeechstart = () => setAudioState("speechstart");
+    rec.onspeechstart = () => { setAudioState("speechstart"); lastSpeechAt = Date.now(); liveEl.textContent = "音声検出中"; };
     rec.onspeechend   = () => setAudioState("speechend");
 
     rec.onerror = (ev) => {
@@ -414,6 +348,7 @@ function speakWarning() {
 
     rec.onresult = (event) => {
       setHeard();
+      lastResultAt = Date.now();
 
       const now = Date.now();
       let interimText = "";
@@ -426,7 +361,6 @@ function speakWarning() {
         else interimText += t;
       }
 
-      // ライブ表示は常に暫定優先
       if (interimText) {
         const it = interimText.trim();
         liveEl.textContent = it || "認識中";
@@ -446,12 +380,8 @@ function speakWarning() {
       }
     };
 
-    try {
-      rec.start();
-    } catch (_) {
-      setErr("start failed");
-      scheduleRecreate("start-failed");
-    }
+    try { rec.start(); }
+    catch (_) { setErr("start failed"); scheduleRecreate("start-failed"); }
   }
 
   async function startAll() {
@@ -460,7 +390,6 @@ function speakWarning() {
     ensureAudio();
     await enableWakeLockAuto();
 
-    // reset
     events = [];
     lastInterimN = 0;
     lastInterimTime = 0;
@@ -474,14 +403,15 @@ function speakWarning() {
     setAudioState("-");
     setErr("-");
     lastHeardEl.textContent = "-";
-    liveEl.textContent = "認識待ち";
+    liveEl.textContent = "話し始めてください";
     setOverlay(false);
     setJudge(false);
 
-    await startMicMeter();
-
     running = true;
     timerId = setInterval(tick, TICK_MS);
+
+    // スマホではマイク競合回避で音量メーターを使わない
+    meterModeEl.textContent = isMobile ? "音量メーター OFF" : "音量メーター ON";
 
     recreateRecognition("start");
   }
@@ -493,7 +423,6 @@ function speakWarning() {
     if (timerId) { clearInterval(timerId); timerId = null; }
 
     stopRecognitionInstance();
-    stopMicMeter();
 
     setStatus("停止中");
     setRecState("stopped");
@@ -513,6 +442,7 @@ function speakWarning() {
   if (!SpeechRecognition) {
     setStatus("非対応");
     setErr("unsupported");
+    liveEl.textContent = "このブラウザは音声認識に非対応";
   }
 </script>
 </body>
